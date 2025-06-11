@@ -2,8 +2,8 @@
   "domain": "temp_udp_receiver",
   "name": "Temperature UDP Receiver",
   "version": "1.0.1",
-  "documentation": "https://github.com/mylukin/temp_udp_receiver",
-  "issue_tracker": "https://github.com/mylukin/temp_udp_receiver/issues",
+  "documentation": "https://github.com/mylukin/temperature_udp_receiver",
+  "issue_tracker": "https://github.com/mylukin/temperature_udp_receiver/issues",
   "dependencies": [],
   "codeowners": [
     "@mylukin"
