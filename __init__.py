@@ -40,9 +40,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         await _cleanup_existing_instance(hass, entry_id, port)
         
         # 检查端口可用性
+        _LOGGER.debug(f"检查端口 {port} 可用性...")
         if not await _check_port_available(port):
             _LOGGER.error(f"端口 {port} 被占用，无法启动服务")
             raise ConfigEntryNotReady(f"端口 {port} 不可用")
+        _LOGGER.debug(f"端口 {port} 检查通过")
         
         # 创建并启动UDP服务器
         udp_server = UDPTempServer(hass, port)
@@ -140,26 +142,35 @@ async def _cleanup_existing_instance(hass: HomeAssistant, entry_id: str, port: i
 
 async def _check_port_available(port: int) -> bool:
     """检查端口是否可用"""
+    sock = None
     try:
         # 尝试绑定UDP端口
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        
+        # 尝试设置 SO_REUSEPORT（如果可用）
         try:
-            sock.bind(('0.0.0.0', port))
-            sock.close()
-            _LOGGER.debug(f"端口 {port} 可用")
-            return True
-        except OSError as e:
-            _LOGGER.debug(f"端口 {port} 不可用: {e}")
-            return False
-        finally:
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
+        except (AttributeError, OSError):
+            # SO_REUSEPORT 在某些系统上不可用，忽略
+            pass
+        
+        sock.bind(('0.0.0.0', port))
+        _LOGGER.debug(f"端口 {port} 可用")
+        return True
+        
+    except OSError as e:
+        _LOGGER.debug(f"端口 {port} 不可用: {e}")
+        return False
+    except Exception as e:
+        _LOGGER.error(f"检查端口可用性时出错: {e}")
+        return False
+    finally:
+        if sock:
             try:
                 sock.close()
             except:
                 pass
-    except Exception as e:
-        _LOGGER.error(f"检查端口可用性时出错: {e}")
-        return False
 
 async def _cleanup_failed_setup(hass: HomeAssistant, entry_id: str) -> None:
     """清理失败的设置过程中创建的资源"""
@@ -250,14 +261,29 @@ class UDPTempServer:
             retry_delay = 1.0
             
             for attempt in range(max_retries):
+                sock = None
                 try:
                     _LOGGER.debug(f"尝试启动UDP服务器，端口: {self.port} (尝试 {attempt + 1}/{max_retries})")
                     
+                    # 创建UDP套接字并设置重用选项
+                    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+                    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                    
+                    # 在某些系统上需要设置 SO_REUSEPORT
+                    try:
+                        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
+                    except (AttributeError, OSError):
+                        # SO_REUSEPORT 在某些系统上不可用，忽略
+                        pass
+                    
+                    # 绑定到指定端口
+                    sock.bind(('0.0.0.0', self.port))
+                    
+                    # 使用预先配置的套接字创建数据报端点
                     loop = asyncio.get_event_loop()
                     self.transport, self.protocol = await loop.create_datagram_endpoint(
                         lambda: UDPProtocol(self.hass),
-                        local_addr=('0.0.0.0', self.port),
-                        reuse_address=True  # 允许地址重用
+                        sock=sock
                     )
                     
                     self._running = True
@@ -265,19 +291,34 @@ class UDPTempServer:
                     return
                     
                 except OSError as e:
-                    if "Address already in use" in str(e) or "Only one usage" in str(e):
-                        _LOGGER.warning(f"端口 {self.port} 被占用，尝试等待并重试... (尝试 {attempt + 1}/{max_retries})")
+                    if sock:
+                        try:
+                            sock.close()
+                        except:
+                            pass
+                    
+                    error_msg = str(e).lower()
+                    if any(msg in error_msg for msg in ["address already in use", "only one usage", "permission denied"]):
+                        _LOGGER.warning(f"端口 {self.port} 启动失败: {e} (尝试 {attempt + 1}/{max_retries})")
                         if attempt < max_retries - 1:
+                            _LOGGER.debug(f"等待 {retry_delay} 秒后重试...")
                             await asyncio.sleep(retry_delay)
                             retry_delay *= 2  # 指数退避
                         else:
-                            raise ConfigEntryNotReady(f"端口 {self.port} 被占用，无法启动服务器")
+                            raise ConfigEntryNotReady(f"端口 {self.port} 无法启动: {e}")
                     else:
+                        _LOGGER.error(f"UDP服务器启动失败 (非端口问题): {e}")
                         raise
                 except Exception as e:
+                    if sock:
+                        try:
+                            sock.close()
+                        except:
+                            pass
                     _LOGGER.error(f"启动UDP服务器失败: {e}")
                     if attempt == max_retries - 1:
-                        raise
+                        raise ConfigEntryNotReady(f"UDP服务器启动失败: {e}")
+                    _LOGGER.debug(f"等待 {retry_delay} 秒后重试...")
                     await asyncio.sleep(retry_delay)
         
     async def stop(self) -> None:
